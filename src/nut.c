@@ -54,9 +54,11 @@ static nut_ups_t *upslist_head = NULL;
 static pthread_mutex_t read_lock = PTHREAD_MUTEX_INITIALIZER;
 static int read_busy = 0;
 
-static const char *config_keys[] = {"UPS","FORCESSL"};
+static const char *config_keys[] = {"UPS","FORCESSL","VERIFYPEER","CAPATH"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 static int force_ssl = 0; // Initialized to default of 0 (false)
+static int verify_peer = 0; // Initialized to default of 0 (false)
+static char *ca_path = NULL;
 
 static void free_nut_ups_t(nut_ups_t *ups) {
   if (ups->conn != NULL) {
@@ -112,11 +114,38 @@ static int nut_force_ssl(const char *value){
   return (0);
 } /* int nut_parse_force_ssl */
 
+static int nut_verify_peer(const char *value){
+  if (strcasecmp(value, "true") == 0)
+    verify_peer = 1;
+  else if (strcasecmp(value, "false") == 0)
+    verify_peer = 0; // Should already be set to 0 from initialization
+  else{
+    verify_peer = 0;
+    WARNING("nut plugin: nut_verify_peer: invalid VERIFYPEER value "\
+      "found. Defaulting to false.");
+  }
+  return (0);
+} /* int nut_verify_peer */
+
+static int nut_ca_path(const char *value){
+  if (value != NULL && strcmp(value,"") !=0){
+    ca_path = malloc(strlen(value)+1);
+    strcpy(ca_path, value);
+  }else{
+    ca_path = NULL; // Should alread be set to NULL from initialization
+  }
+  return (0);
+} /* int nut_ca_path */
+
 static int nut_config(const char *key, const char *value) {
   if (strcasecmp(key, "UPS") == 0)
     return (nut_add_ups(value));
   else if (strcasecmp(key, "FORCESSL") == 0)
     return (nut_force_ssl(value));
+  else if (strcasecmp(key, "VERIFYPEER") == 0)
+    return (nut_verify_peer(value));
+  else if (strcasecmp(key, "CAPATH") == 0)
+    return (nut_ca_path(value));
   else
     return (-1);
 } /* int nut_config */
@@ -156,7 +185,32 @@ static int nut_read_one(nut_ups_t *ups) {
       return (-1);
     }
 
-    if (force_ssl == 1)
+    if (verify_peer == 1 && force_ssl == 0){
+      WARNING("nut plugin: nut_read_one: VerifyPeer true but ForceSSL "\
+        "false. Setting ForceSSL to true.");
+      force_ssl = 1;
+    }
+
+    if (verify_peer == 1 && ca_path == NULL){
+      ERROR("nut plugin: nut_read_one: VerifyPeer true but missing "\
+        "CAPath value.");
+      return(-1);
+    }
+
+    if (verify_peer == 1){
+      status = upscli_init(verify_peer, ca_path, NULL, NULL);
+
+      if (status != 1){
+        ERROR("nut plugin: nut_read_one: upscli_init (%i, %s) failed: %s",
+              verify_peer, ca_path, upscli_strerror(ups->conn));
+        upscli_cleanup();
+        return (-1);
+      }
+    } /* if (verify_peer == 1) */
+
+    if (verify_peer == 1)
+      ssl_flags = (UPSCLI_CONN_REQSSL | UPSCLI_CONN_CERTVERIF);
+    else if (force_ssl == 1)
       ssl_flags = UPSCLI_CONN_REQSSL;
     else
       ssl_flags = UPSCLI_CONN_TRYSSL;
@@ -167,6 +221,7 @@ static int nut_read_one(nut_ups_t *ups) {
       ERROR("nut plugin: nut_read_one: upscli_connect (%s, %i) failed: %s",
             ups->hostname, ups->port, upscli_strerror(ups->conn));
       sfree(ups->conn);
+      upscli_cleanup();
       return (-1);
     } /* if (status != 0) */
 
@@ -175,8 +230,13 @@ static int nut_read_one(nut_ups_t *ups) {
 
     // Output INFO or WARNING based on SSL and VERIFICATION
     ssl_status =  upscli_ssl(ups->conn); // 1 for SSL, 0 for not, -1 for error
-    if (ssl_status == 1){
-      INFO("nut plugin: Connection is secured with SSL.");
+    if (ssl_status == 1 && verify_peer == 1){
+      INFO("nut plugin: Connection is secured with SSL and certificate "\
+        "has been verified.");
+    }
+    else if (ssl_status == 1){
+      INFO("nut plugin: Connection is secured with SSL with no verification "\
+        "of server SSL certificate.");
     }
     else if (ssl_status == 0){
       WARNING("nut plugin: Connection is unsecured (no SSL).");
@@ -184,6 +244,7 @@ static int nut_read_one(nut_ups_t *ups) {
       ERROR("nut plugin: nut_read_one: upscli_ssl failed: %s",
             upscli_strerror(ups->conn));
       sfree(ups->conn);
+      upscli_cleanup();
       return (-1);
     } /* if (ssl_status == 1 && verify_peer == 1) */
 
@@ -197,6 +258,7 @@ static int nut_read_one(nut_ups_t *ups) {
           ups->upsname, upscli_strerror(ups->conn));
     upscli_disconnect(ups->conn);
     sfree(ups->conn);
+    upscli_cleanup();
     return (-1);
   }
 
@@ -284,6 +346,8 @@ static int nut_shutdown(void) {
     free_nut_ups_t(this);
     this = next;
   }
+
+  upscli_cleanup();
 
   return (0);
 } /* int nut_shutdown */
