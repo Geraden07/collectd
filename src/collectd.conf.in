@@ -942,6 +942,9 @@
 
 #<Plugin nut>
 #	UPS "upsname@hostname:port"
+#   ForceSSL true
+#   VerifyPeer false
+#   CAPath "/path/to/folder"
 #</Plugin>
 
 #<Plugin olsrd>
@@ -1384,7 +1387,7 @@
 #	SystemManagementInterrupt true
 #	DigitalTemperatureSensor true
 #	PackageThermalManagement true
-#	RunningAveragePowerLimit "7"	
+#	RunningAveragePowerLimit "7"
 #</Plugin>
 
 #<Plugin unixsock>
